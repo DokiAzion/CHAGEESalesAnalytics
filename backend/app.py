@@ -15,7 +15,6 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    # 先删除旧表，确保数据结构最新
     c.execute("DROP TABLE IF EXISTS sales")
 
     c.execute(
@@ -65,7 +64,8 @@ def init_db():
                     )
                     count += 1
                 except Exception as e:
-                    print(f"跳过错误行: {e}")
+                    # 忽略单行错误，避免整个导入失败
+                    pass
 
             conn.commit()
             print(f"成功导入 {count} 条数据。")
@@ -80,14 +80,11 @@ def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
 
-    # 检查表是否存在
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sales';")
     if not cursor.fetchone():
         conn.close()
-        # 如果表不存在，重新初始化
         init_db()
-        # 重新连接
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
 
@@ -110,22 +107,22 @@ def index():
 
 @app.route('/api/summary')
 def api_summary():
+    # 注意：前端使用 d.avg_member，这里别名改为 avg_member
     r = query(
-        "SELECT SUM(quantity) as total_qty, SUM(revenue) as total_revenue, COUNT(*) as total_records, AVG(member_pct) as avg_member_pct FROM sales")
+        "SELECT SUM(quantity) as total_qty, SUM(revenue) as total_revenue, COUNT(*) as total_records, AVG(member_pct) as avg_member FROM sales")
     if r:
         return jsonify(r[0])
     return jsonify({})
 
 
-# --- 补全前端请求的其他 API 接口 ---
-
 @app.route('/api/monthly')
 def api_monthly():
     """按月统计销售额和销量"""
+    # 修改别名：total_revenue -> revenue, total_qty -> qty 以匹配前端
     sql = """
         SELECT substr(date, 1, 7) as month, 
-               SUM(revenue) as total_revenue, 
-               SUM(quantity) as total_qty 
+               SUM(revenue) as revenue, 
+               SUM(quantity) as qty 
         FROM sales 
         GROUP BY month 
         ORDER BY month
@@ -136,11 +133,12 @@ def api_monthly():
 @app.route('/api/product_rank')
 def api_product_rank():
     """产品销量排行 Top 10"""
+    # 修改别名：total_qty -> qty
     sql = """
-        SELECT product, SUM(quantity) as total_qty, SUM(revenue) as total_revenue 
+        SELECT product, SUM(quantity) as qty, SUM(revenue) as revenue 
         FROM sales 
         GROUP BY product 
-        ORDER BY total_qty DESC 
+        ORDER BY qty DESC 
         LIMIT 10
     """
     return jsonify(query(sql))
@@ -149,8 +147,10 @@ def api_product_rank():
 @app.route('/api/category_pie')
 def api_category_pie():
     """品类销售占比"""
+    # 前端图表使用的是 qty (销量)，所以这里返回 qty
+    # 如果前端想展示营收占比，需修改前端 JS 将 r.qty 改为 r.revenue
     sql = """
-        SELECT category, SUM(revenue) as total_revenue 
+        SELECT category, SUM(quantity) as qty 
         FROM sales 
         GROUP BY category
     """
@@ -160,11 +160,12 @@ def api_category_pie():
 @app.route('/api/city_rank')
 def api_city_rank():
     """城市销量排行"""
+    # 修改别名
     sql = """
-        SELECT city, SUM(revenue) as total_revenue, SUM(quantity) as total_qty 
+        SELECT city, SUM(revenue) as revenue, SUM(quantity) as qty 
         FROM sales 
         GROUP BY city 
-        ORDER BY total_revenue DESC
+        ORDER BY revenue DESC
     """
     return jsonify(query(sql))
 
@@ -172,8 +173,9 @@ def api_city_rank():
 @app.route('/api/season')
 def api_season():
     """季节销售分析"""
+    # 修改别名
     sql = """
-        SELECT season, SUM(revenue) as total_revenue, SUM(quantity) as total_qty 
+        SELECT season, SUM(revenue) as revenue, SUM(quantity) as qty 
         FROM sales 
         GROUP BY season
     """
@@ -183,8 +185,9 @@ def api_season():
 @app.route('/api/weather')
 def api_weather():
     """天气对销售的影响"""
+    # 修改别名
     sql = """
-        SELECT weather, AVG(revenue) as avg_revenue, SUM(quantity) as total_qty 
+        SELECT weather, AVG(revenue) as avg_revenue, AVG(quantity) as avg_qty 
         FROM sales 
         GROUP BY weather
     """
@@ -194,8 +197,9 @@ def api_weather():
 @app.route('/api/campaign')
 def api_campaign():
     """营销活动效果分析"""
+    # 修改别名
     sql = """
-        SELECT campaign, SUM(revenue) as total_revenue, AVG(discount) as avg_discount 
+        SELECT campaign, SUM(revenue) as revenue, AVG(quantity) as avg_qty 
         FROM sales 
         GROUP BY campaign
     """
@@ -204,24 +208,42 @@ def api_campaign():
 
 @app.route('/api/city_product')
 def api_city_product():
-    """各城市热门产品 (简单返回前5个城市的前3产品)"""
-    # 这里为了简化，返回每个城市销售额最高的产品
-    sql = """
-        SELECT city, product, SUM(revenue) as total_revenue
+    """各城市热门产品 - 热力图数据预处理"""
+    raw_data = query("""
+        SELECT city, product, SUM(quantity) as qty
         FROM sales
         GROUP BY city, product
-        ORDER BY city, total_revenue DESC
-    """
-    # 注意：SQLite 没有简单的 TOP N per group 语法，这里返回所有组合，前端可过滤或后端需复杂处理
-    # 为简单起见，直接返回原始数据供前端处理，或者限制总数
-    return jsonify(query(sql + " LIMIT 50"))
+    """)
+
+    # 提取所有唯一的城市和产品的列表，用于建立索引映射
+    cities = sorted(list(set([r['city'] for r in raw_data])))
+    products = sorted(list(set([r['product'] for r in raw_data])))
+
+    # 创建映射字典
+    city_index = {c: i for i, c in enumerate(cities)}
+    product_index = {p: i for i, p in enumerate(products)}
+
+    # 转换数据格式为 [cityIndex, productIndex, value]
+    heatmap_data = []
+    for r in raw_data:
+        c_idx = city_index.get(r['city'])
+        p_idx = product_index.get(r['product'])
+        if c_idx is not None and p_idx is not None:
+            heatmap_data.append([c_idx, p_idx, r['qty']])
+
+    return jsonify({
+        "cities": cities,
+        "products": products,
+        "data": heatmap_data
+    })
 
 
 @app.route('/api/holiday')
 def api_holiday():
     """节假日 vs 非节假日对比"""
+    # 修改别名
     sql = """
-        SELECT is_holiday, SUM(revenue) as total_revenue, AVG(quantity) as avg_qty 
+        SELECT is_holiday, SUM(revenue) as avg_revenue, AVG(quantity) as avg_qty 
         FROM sales 
         GROUP BY is_holiday
     """
@@ -231,7 +253,7 @@ def api_holiday():
 @app.route('/api/discount')
 def api_discount():
     """折扣区间分析"""
-    # 简单将折扣分为几个区间
+    # 修改别名
     sql = """
         SELECT 
             CASE 
@@ -240,8 +262,9 @@ def api_discount():
                 WHEN discount >= 0.7 THEN '7-8折'
                 ELSE '7折以下'
             END as discount_range,
-            SUM(revenue) as total_revenue,
-            SUM(quantity) as total_qty
+            SUM(revenue) as revenue,
+            SUM(quantity) as qty,
+            AVG(quantity) as avg_qty
         FROM sales
         GROUP BY discount_range
         ORDER BY discount_range
@@ -250,13 +273,17 @@ def api_discount():
 
 
 if __name__ == '__main__':
-    # 每次启动都检查数据库状态，如果表缺失则自动重建
-    # 如果想强制刷新数据，可以手动删除 bawangchaji.db 文件
     if not os.path.exists(DB_PATH):
         init_db()
     else:
-        # 可选：如果希望每次启动都强制更新数据，取消下面注释
-        # init_db()
-        pass
+        # 检查表是否存在，不存在则重建
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sales';")
+        if not cursor.fetchone():
+            conn.close()
+            init_db()
+        else:
+            conn.close()
 
     app.run(host='0.0.0.0', port=5000, debug=True)

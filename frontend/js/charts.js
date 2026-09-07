@@ -10,9 +10,11 @@ function fmt(n) { return n == null ? "--" : Number(n).toLocaleString("zh-CN"); }
 
 // ── KPI ────────────────────────────────────────
 fetch("/api/summary").then(r=>r.json()).then(d=>{
+    // 确保字段存在再显示
     document.querySelector("#kpi-qty .kpi-value").textContent = fmt(d.total_qty);
     document.querySelector("#kpi-rev .kpi-value").textContent = fmt(d.total_revenue);
     document.querySelector("#kpi-records .kpi-value").textContent = fmt(d.total_records);
+    // 注意：后端返回的是 avg_member，不是 avg_member_pct
     document.querySelector("#kpi-member .kpi-value").textContent = d.avg_member != null ? d.avg_member.toFixed(1) + "%" : "--";
 });
 
@@ -28,7 +30,9 @@ fetch("/api/monthly").then(r=>r.json()).then(d=>{
             { type: "value", name: "营收" }
         ],
         series: [
+            // 后端已改为返回 qty
             { name:"销量(杯)", type:"line", data:d.map(r=>r.qty), smooth:true, itemStyle:{color:purple} },
+            // 后端已改为返回 revenue
             { name:"营收(元)", type:"bar", yAxisIndex:1, data:d.map(r=>r.revenue), itemStyle:{color:orange}, barWidth:24 }
         ],
         grid: { left:60, right:60, bottom:50, top:50 }
@@ -43,6 +47,7 @@ fetch("/api/product_rank").then(r=>r.json()).then(d=>{
         tooltip: { trigger:"axis" },
         xAxis: { type:"value" },
         yAxis: { type:"category", data:d.map(r=>r.product).reverse(), axisLabel:{width:80,overflow:"truncate"} },
+        // 后端已改为返回 qty
         series: [{ type:"bar", data:d.map(r=>r.qty).reverse(), itemStyle:{color:purple}, barWidth:18, label:{show:true,position:"right",formatter:"{c}"} }],
         grid: { left:110, right:60, top:10, bottom:20 }
     });
@@ -56,6 +61,7 @@ fetch("/api/category_pie").then(r=>r.json()).then(d=>{
         tooltip: { trigger:"item", formatter:"{b}: {c}杯 ({d}%)" },
         series: [{
             type:"pie", radius:["40%","70%"], center:["50%","55%"],
+            // 后端已改为返回 qty
             data: d.map((r,i)=>({ name:r.category, value:r.qty, itemStyle:{color:palette[i]} })),
             label: { formatter:"{b}\n{d}%" }
         }]
@@ -70,6 +76,7 @@ fetch("/api/city_rank").then(r=>r.json()).then(d=>{
         tooltip: { trigger:"axis" },
         xAxis: { type:"category", data:d.map(r=>r.city), axisLabel:{rotate:35} },
         yAxis: { type:"value", name:"营收(元)" },
+        // 后端已改为返回 revenue
         series: [{ type:"bar", data:d.map(r=>r.revenue), itemStyle:{color:purple}, barWidth:20, label:{show:true,position:"top",fontSize:10} }],
         grid: { left:60, right:20, bottom:50, top:30 }
     });
@@ -85,6 +92,7 @@ fetch("/api/season").then(r=>r.json()).then(d=>{
         tooltip: { trigger:"axis" },
         xAxis: { type:"category", data:d.map(r=>r.season) },
         yAxis: { type:"value" },
+        // 后端已改为返回 qty
         series: [{
             type:"bar", data:d.map((r,i)=>({ value:r.qty, itemStyle:{color:palette[i]} })),
             barWidth:40, label:{show:true,position:"top",formatter:"{c}杯"}
@@ -101,6 +109,7 @@ fetch("/api/weather").then(r=>r.json()).then(d=>{
         tooltip: { trigger:"axis" },
         xAxis: { type:"category", data:d.map(r=>r.weather) },
         yAxis: { type:"value", name:"平均销量" },
+        // 后端已改为返回 avg_qty
         series: [{ type:"bar", data:d.map((r,i)=>({ value:Math.round(r.avg_qty), itemStyle:{color:palette[i%palette.length]} })), barWidth:28, label:{show:true,position:"top"} }],
         grid: { left:50, right:20, bottom:20, top:30 }
     });
@@ -114,6 +123,7 @@ fetch("/api/campaign").then(r=>r.json()).then(d=>{
         tooltip: { trigger:"axis" },
         xAxis: { type:"category", data:d.map(r=>r.campaign), axisLabel:{rotate:35,fontSize:11} },
         yAxis: { type:"value", name:"平均销量" },
+        // 后端已改为返回 avg_qty
         series: [{ type:"bar", data:d.map((r,i)=>({ value:Math.round(r.avg_qty), itemStyle:{color:palette[i%palette.length]} })), barWidth:24, label:{show:true,position:"top"} }],
         grid: { left:50, right:20, bottom:70, top:30 }
     });
@@ -123,13 +133,47 @@ fetch("/api/campaign").then(r=>r.json()).then(d=>{
 // ── 热力图 ────────────────────────────────────
 fetch("/api/city_product").then(r=>r.json()).then(d=>{
     const c = echarts.init(document.getElementById("chart-heatmap"));
-    const max = Math.max(...d.data.map(v=>v[2]));
+
+    // d 现在包含 { cities: [], products: [], data: [] }
+    if (!d.cities || !d.products) return;
+
+    const max = Math.max(...d.data.map(v=>v[2]), 1); // 防止空数据报错
+
     c.setOption({
-        tooltip: { formatter: p => `${d.cities[p.data[1]]} - ${d.products[p.data[0]]}<br/>销量: ${p.data[2]}杯` },
-        xAxis: { type:"category", data:d.products, axisLabel:{rotate:30,fontSize:11}, splitArea:{show:true} },
-        yAxis: { type:"category", data:d.cities, splitArea:{show:true} },
-        visualMap: { min:0, max, calculable:true, orient:"horizontal", left:"center", bottom:0, inRange:{ color:["#f3e8ff",purple,"#3b0764"] } },
-        series: [{ type:"heatmap", data:d.data, label:{show:true,fontSize:10}, emphasis:{itemStyle:{shadowBlur:10,shadowColor:"rgba(0,0,0,.5)"}} }],
+        tooltip: {
+            formatter: p => {
+                const cityName = d.cities[p.data[1]];
+                const productName = d.products[p.data[0]];
+                const val = p.data[2];
+                return `${cityName} - ${productName}<br/>销量: ${val}杯`;
+            }
+        },
+        xAxis: {
+            type:"category",
+            data:d.products,
+            axisLabel:{rotate:30,fontSize:11},
+            splitArea:{show:true}
+        },
+        yAxis: {
+            type:"category",
+            data:d.cities,
+            splitArea:{show:true}
+        },
+        visualMap: {
+            min:0,
+            max:max,
+            calculable:true,
+            orient:"horizontal",
+            left:"center",
+            bottom:0,
+            inRange:{ color:["#f3e8ff",purple,"#3b0764"] }
+        },
+        series: [{
+            type:"heatmap",
+            data:d.data,
+            label:{show:true,fontSize:10},
+            emphasis:{itemStyle:{shadowBlur:10,shadowColor:"rgba(0,0,0,.5)"}}
+        }],
         grid: { left:80, right:20, bottom:60, top:10 }
     });
     window.addEventListener("resize", ()=>c.resize());
@@ -147,7 +191,9 @@ fetch("/api/holiday").then(r=>r.json()).then(d=>{
             { type:"value", name:"平均营收" }
         ],
         series: [
+            // 后端已改为返回 avg_qty
             { name:"平均销量", type:"bar", data:d.map(r=>Math.round(r.avg_qty)), itemStyle:{color:purple}, barWidth:36 },
+            // 后端已改为返回 avg_revenue
             { name:"平均营收", type:"bar", yAxisIndex:1, data:d.map(r=>Math.round(r.avg_revenue)), itemStyle:{color:orange}, barWidth:36 }
         ],
         grid: { left:60, right:60, bottom:40, top:20 }
@@ -160,11 +206,11 @@ fetch("/api/discount").then(r=>r.json()).then(d=>{
     const c = echarts.init(document.getElementById("chart-discount"));
     c.setOption({
         tooltip: { trigger:"axis" },
-        xAxis: { type:"category", data:d.map(r=> r.discount===0?"原价":Math.round((1-r.discount)*10)+"折"), axisLabel:{rotate:20} },
+        xAxis: { type:"category", data:d.map(r=> r.discount_range?r.discount_range:"未知"), axisLabel:{rotate:20} },
         yAxis: { type:"value", name:"平均销量" },
+        // 后端已改为返回 avg_qty
         series: [{ type:"bar", data:d.map((r,i)=>({ value:Math.round(r.avg_qty), itemStyle:{color:palette[i]} })), barWidth:36, label:{show:true,position:"top"} }],
         grid: { left:50, right:20, bottom:40, top:20 }
     });
     window.addEventListener("resize", ()=>c.resize());
 });
-
